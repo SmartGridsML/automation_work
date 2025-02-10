@@ -85,19 +85,44 @@ def summarize_with_groq(text, level):
         {"role": "user", "content": summary_prompt[level] + "\n\n" + text},
     ]
 
-    # Call the chat completions endpoint
-    response = client.chat.completions.create(
-        model="llama3-70b-8192",  # Specify the model
-        messages=messages,
-        temperature=0.3,
-        max_tokens=140,
-    )
-    # print(response.json())
-    # Extract the summary from the response
-    # return response["choices"][0]["message"]["content"]
-    content = response.choices[0].message.content
-    print(content)  # For debugging purposes
-    return content
+    try:
+        # Call the chat completions endpoint
+        response = client.chat.completions.create(
+            model="llama3-70b-8192",  # Specify the model
+            messages=messages,
+            temperature=0.3,
+            max_tokens=140,
+        )
+        content = response.choices[0].message.content
+        print(content)  # For debugging purposes
+        return content
+
+    except Exception as e:
+        error_response = str(e)
+        if "Request too large" in error_response or "rate_limit_exceeded" in error_response:
+            print("Request too large, splitting text into smaller chunks...")
+            chunk_size = 500  # Adjust chunk size based on token limits
+            chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+            # Summarize each chunk and combine the results
+            summaries = []
+            for i, chunk in enumerate(chunks):
+                print(f"Summarizing chunk {i + 1}/{len(chunks)}")
+                chunk_messages = [
+                    {"role": "system", "content": "You are a helpful summarization assistant."},
+                    {"role": "user", "content": summary_prompt[level] + "\n\n" + chunk},
+                ]
+                chunk_response = client.chat.completions.create(
+                    model="llama3-70b-8192",
+                    messages=chunk_messages,
+                    temperature=0.3,
+                    max_tokens=140,
+                )
+                summaries.append(chunk_response.choices[0].message.content)
+            return " ".join(summaries)
+        else:
+            raise e
+
 
 def summarize_text(text, level, engine):
     """Chooses Groq or OpenAI for summarization."""
