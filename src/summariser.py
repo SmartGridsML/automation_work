@@ -7,8 +7,9 @@ import config
 import os
 from typing import Union
 from dotenv import load_dotenv
-
+import time
 import requests
+from groq import Groq
 
 load_dotenv()
 
@@ -68,66 +69,72 @@ def extract_tables_from_pdf(pdf_source):
 
 
 def summarize_with_groq(text, level):
-    """Summarizes text using Groq API."""
-    headers = {"Authorization": f"Bearer {os.environ['GROQ_API_KEY']}", "Content-Type": "application/json"}
+    """Summarizes text using Groq's official Python client."""
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))  # Initialize the Groq client
+
+    # Define the summary prompt based on the desired level
     summary_prompt = {
         "short": "Give a one-sentence TL;DR summary:",
         "medium": "Summarize this in 150 words:",
         "long": "Summarize this in detail within 500 words:",
     }
-    payload = {
-        "model": "llama2-70b-chat",
-        "messages": [{"role": "user", "content": summary_prompt[level] + text}],
-        "temperature": 0.3,
-        "max_tokens": 140
-    }
-    response = requests.post(GROQ_API_URL, json=payload, headers=headers)
-    return response.json()["choices"][0]["message"]["content"]
+
+    # Prepare the chat messages
+    messages = [
+        {"role": "system", "content": "You are a helpful summarization assistant."},
+        {"role": "user", "content": summary_prompt[level] + "\n\n" + text},
+    ]
+
+    # Call the chat completions endpoint
+    response = client.chat.completions.create(
+        model="llama3-70b-8192",  # Specify the model
+        messages=messages,
+        temperature=0.3,
+        max_tokens=140,
+    )
+    # print(response.json())
+    # Extract the summary from the response
+    # return response["choices"][0]["message"]["content"]
+    content = response.choices[0].message.content
+    print(content)  # For debugging purposes
+    return content
 
 def summarize_text(text, level, engine):
     """Chooses Groq or OpenAI for summarization."""
     if engine == "groq":
         return summarize_with_groq(text, level)
     else:
-    #     openai.api_key = os.environ["OPENAI_API_KEY"]
-    #     summary_prompt = {
-    #     "short": "Give a one-sentence TL;DR summary:",
-    #     "medium": "Summarize this in 150 words:",
-    #     "long": "Summarize this in detail within 500 words:",
-    #     }
-
-    #     response = openai.ChatCompletion.create(
-    #         model="gpt-4",  # Use "gpt-4" or "gpt-3.5-turbo"
-    #         messages=[
-    #             {"role": "system", "content": "You are a helpful summarization assistant."},
-    #             {"role": "user", "content": summary_prompt[level] + "\n\n" + text},
-    #         ],
-    #         temperature=0.3,
-    #         max_tokens=140,
-    #         top_p=1,
-    #         frequency_penalty=0,
-    #         presence_penalty=0,
-    #     )
-    # return response["choices"][0]["message"]["content"]
         openai.api_key = os.environ["OPENAI_API_KEY"]
         summary_prompt = {
             "short": "Give a one-sentence TL;DR summary:",
-            "medium": "Summarize this in 150 words:",
+            "medium": "Summarize this in around 150 words:",
             "long": "Summarize this in detail within 500 words:",
         }
 
         client = openai.OpenAI()
+        max_retries = 5
+        retry_delay = 5  # Initial delay in seconds
 
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",  # Use "gpt-4" or "gpt-3.5-turbo"
-            messages=[
-                {"role": "system", "content": "You are a helpful summarization assistant."},
-                {"role": "user", "content": summary_prompt[level] + "\n\n" + text},
-            ],
-            temperature=0.3,
-            max_tokens=140,
-            top_p=1,
-            frequency_penalty=0,
-            presence_penalty=0,
-        )
-        return response.choices[0].message.content
+        for attempt in range(max_retries):
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-3.5-turbo",  # Use "gpt-4" or "gpt-3.5-turbo"
+                    messages=[
+                        {"role": "system", "content": "You are a helpful summarization assistant."},
+                        {"role": "user", "content": summary_prompt[level] + "\n\n" + text},
+                    ],
+                    temperature=0.3,
+                    max_tokens=140,
+                    top_p=1,
+                    frequency_penalty=0,
+                    presence_penalty=0,
+                )
+                return response.choices[0].message.content
+            except openai.RateLimitError:
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    raise Exception("Exceeded maximum retries due to rate limiting.")
+            except Exception as e:
+                raise Exception(f"OpenAI API error: {e}")
