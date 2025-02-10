@@ -19,8 +19,16 @@ def main():
     engine = st.selectbox("Select engine", ["groq", "openai"], key="engine_option")
 
     # Automatically trigger summarization when inputs are changed
-    if st.session_state.get("trigger_summary") is None:
+    if "trigger_summary" not in st.session_state:
         st.session_state["trigger_summary"] = False
+
+    # Check if the summary level has changed
+    if "prev_level" not in st.session_state:
+        st.session_state["prev_level"] = level
+
+    if st.session_state["prev_level"] != level:
+        st.session_state["trigger_summary"] = True
+        st.session_state["prev_level"] = level
 
     # Submit button logic
     trigger_summary = st.button("Summarize") or st.session_state["trigger_summary"]
@@ -63,7 +71,6 @@ def main():
                     st.error(f"Error: {response.status_code} - {response.text}")
             except Exception as e:
                 st.error(f"An error occurred: {e}")
-
 
 if __name__ == "__main__":
     main()
