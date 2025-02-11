@@ -2,164 +2,135 @@ import openai
 import wget
 import pathlib
 import pdfplumber
-import numpy as np
-import config
+import requests
+import time
 import os
 from typing import Union
-from dotenv import load_dotenv
-import time
-import requests
 from groq import Groq
-
-load_dotenv()
-
-
-GROQ_API_URL = "https://api.groq.com/v1/chat/completions"
+from config import GROQ_API_KEY, OPENAI_API_KEY  # Use centralized config
 
 def download_pdf_from_url(url, filename="downloaded_paper.pdf"):
     """Downloads a PDF from a given URL and saves it to the local filesystem."""
     local_path = wget.download(url, filename)
     return pathlib.Path(local_path)
 
-def process_pdf(source, level, engine):
-    """
-    Processes a PDF from either a URL or a file object.
-    """
-    if isinstance(source, str) and (source.startswith("http://") or source.startswith("https://")):
-        pdf_path = download_pdf_from_url(source)  # Download and get path
+def process_pdf(source: Union[str, pathlib.Path], level: str, engine: str):
+    """Processes a PDF from a URL or file object."""
+    if isinstance(source, str) and source.startswith(("http://", "https://")):
+        pdf_path = download_pdf_from_url(source)
     else:
-        pdf_path = source  # Use the file object directly for uploaded files
+        pdf_path = source
 
-    # Process the PDF
     text = extract_text_from_pdf(pdf_path)
     tables = extract_tables_from_pdf(pdf_path)
-    summary = summarize_text(text, level, engine)
+    summary = summarize_text(text, level, engine)  # ✅ Now `summarize_text` exists
 
     return {"summary": summary, "tables": tables}
 
-
-
-def extract_text_from_pdf(pdf_source):
-    """Extracts text from a given PDF file or file-like object using pdfplumber."""
+def extract_text_from_pdf(pdf_path: pathlib.Path):
+    """Extracts text from a given PDF file using pdfplumber."""
     text = ""
-    if isinstance(pdf_source, pathlib.Path):  # If it's a file path
-        with pdfplumber.open(pdf_source) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() + "\n"
-    else:  # Handle file-like objects
-        with pdfplumber.open(pdf_source) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() + "\n"
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text() or ""
     return text.strip()
 
-
-
-def extract_tables_from_pdf(pdf_source):
-    """Extracts tables from a given PDF file or file-like object using pdfplumber."""
+def extract_tables_from_pdf(pdf_path: pathlib.Path):
+    """Extracts tables from a given PDF file using pdfplumber."""
     tables = []
-    if isinstance(pdf_source, pathlib.Path):  # If it's a file path
-        with pdfplumber.open(pdf_source) as pdf:
-            for page in pdf.pages:
-                tables.extend(page.extract_tables())
-    else:  # Handle file-like objects
-        with pdfplumber.open(pdf_source) as pdf:
-            for page in pdf.pages:
-                tables.extend(page.extract_tables())
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            tables.extend(page.extract_tables())
     return tables
 
+def summarize_with_groq(text: str, level: str):
+    """Summarizes text using Groq's API with improved error handling."""
+    client = Groq(api_key=GROQ_API_KEY)
 
-def summarize_with_groq(text, level):
-    """Summarizes text using Groq's official Python client."""
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))  # Initialize the Groq client
-
-    # Define the summary prompt based on the desired level
     summary_prompt = {
         "short": "Give a one-sentence TL;DR summary:",
-        "medium": "Summarize this in 150 words:",
-        "long": "Summarize this in detail within 500 words:",
+        "medium": "Summarize this in around 150 words :",
+        "long": "Summarize this in detail in arounf 500 words:",
     }
 
-    # Prepare the chat messages
     messages = [
         {"role": "system", "content": "You are a helpful summarization assistant."},
         {"role": "user", "content": summary_prompt[level] + "\n\n" + text},
     ]
 
     try:
-        # Call the chat completions endpoint
         response = client.chat.completions.create(
-            model="llama3-70b-8192",  # Specify the model
+            model="llama3-70b-8192",
             messages=messages,
             temperature=0.3,
             max_tokens=140,
         )
-        content = response.choices[0].message.content
-        print(content)  # For debugging purposes
-        return content
-
+        return response.choices[0].message.content
     except Exception as e:
-        error_response = str(e)
-        if "Request too large" in error_response or "rate_limit_exceeded" in error_response:
-            print("Request too large, splitting text into smaller chunks...")
-            chunk_size = 500  # Adjust chunk size based on token limits
-            chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+        if "rate_limit_exceeded" in str(e) or "Request too large" in str(e):
+            return handle_large_text(text, level, client)
+        raise e
 
-            # Summarize each chunk and combine the results
-            summaries = []
-            for i, chunk in enumerate(chunks):
-                print(f"Summarizing chunk {i + 1}/{len(chunks)}")
-                chunk_messages = [
+def handle_large_text(text, level, client):
+    """Splits text into chunks and summarizes each chunk."""
+    chunk_size = 500
+    chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
+    summaries = []
+
+    for chunk in chunks:
+        messages = [
+            {"role": "system", "content": "You are a helpful summarization assistant."},
+            {"role": "user", "content": chunk},
+        ]
+        response = client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=messages,
+            temperature=0.3,
+            max_tokens=140,
+        )
+        summaries.append(response.choices[0].message.content)
+
+    return " ".join(summaries)
+
+def summarize_with_openai(text: str, level: str):
+    """Summarizes text using OpenAI's GPT API."""
+    openai.api_key = OPENAI_API_KEY
+
+    summary_prompt = {
+        "short": "Give a one-sentence TL;DR summary:",
+        "medium": "Summarize this in 150 words:",
+        "long": "Summarize this in detail within 500 words:",
+    }
+
+    max_retries = 5
+    retry_delay = 5  # Start with 5 seconds
+
+    for attempt in range(max_retries):
+        try:
+            response = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[
                     {"role": "system", "content": "You are a helpful summarization assistant."},
-                    {"role": "user", "content": summary_prompt[level] + "\n\n" + chunk},
-                ]
-                chunk_response = client.chat.completions.create(
-                    model="llama3-70b-8192",
-                    messages=chunk_messages,
-                    temperature=0.3,
-                    max_tokens=140,
-                )
-                summaries.append(chunk_response.choices[0].message.content)
-            return " ".join(summaries)
-        else:
-            raise e
+                    {"role": "user", "content": summary_prompt[level] + "\n\n" + text},
+                ],
+                temperature=0.3,
+                max_tokens=140,
+            )
+            return response["choices"][0]["message"]["content"]
+        except openai.error.RateLimitError:
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+            else:
+                raise Exception("Exceeded maximum retries due to OpenAI rate limiting.")
+        except Exception as e:
+            raise Exception(f"OpenAI API error: {e}")
 
-
-def summarize_text(text, level, engine):
-    """Chooses Groq or OpenAI for summarization."""
+def summarize_text(text: str, level: str, engine: str):
+    """Chooses between Groq and OpenAI for summarization."""
     if engine == "groq":
         return summarize_with_groq(text, level)
+    elif engine == "openai":
+        return summarize_with_openai(text, level)
     else:
-        openai.api_key = os.environ["OPENAI_API_KEY"]
-        summary_prompt = {
-            "short": "Give a one-sentence TL;DR summary:",
-            "medium": "Summarize this in around 150 words:",
-            "long": "Summarize this in detail within 500 words:",
-        }
-
-        client = openai.OpenAI()
-        max_retries = 5
-        retry_delay = 5  # Initial delay in seconds
-
-        for attempt in range(max_retries):
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",  # Use "gpt-4" or "gpt-3.5-turbo"
-                    messages=[
-                        {"role": "system", "content": "You are a helpful summarization assistant."},
-                        {"role": "user", "content": summary_prompt[level] + "\n\n" + text},
-                    ],
-                    temperature=0.3,
-                    max_tokens=140,
-                    top_p=1,
-                    frequency_penalty=0,
-                    presence_penalty=0,
-                )
-                return response.choices[0].message.content
-            except openai.RateLimitError:
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                else:
-                    raise Exception("Exceeded maximum retries due to rate limiting.")
-            except Exception as e:
-                raise Exception(f"OpenAI API error: {e}")
+        raise ValueError("Invalid engine selected. Choose 'groq' or 'openai'.")
